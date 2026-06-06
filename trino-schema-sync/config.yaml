@@ -1,0 +1,8 @@
+output_path_field: "~/data/trino表结构字段索引.md"
+output_path_schema: "~/data/trino库索引.md"
+output_path_table: "~/data/trino表索引.md"
+
+blacklist:
+  - test_cly
+  - dw_backup
+  - health_check
