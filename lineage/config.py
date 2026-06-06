@@ -5,10 +5,11 @@ from pathlib import Path
 HOME = Path.home()
 
 ETL_SQL_DIR = HOME / "code/etl-dw/src/main/resources/etl-sql/"
-OUTPUT_DIR = HOME / "data/"
+OUTPUT_DIR = HOME / "data/etl-tools/"
 
 ETL_GRAPH_FILE = OUTPUT_DIR / "etl依赖图.json"
 ETL_INDEX_FILE = OUTPUT_DIR / "etl表血缘索引.md"
+LAST_RUN_FILE = OUTPUT_DIR / "lineage_last_run.json"
 
 IGNORE_DIRS = {
     "es2ods",

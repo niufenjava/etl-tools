@@ -8,6 +8,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -19,12 +20,15 @@ from config import (
     IGNORE_DAVINCI,
     IGNORE_DIRS,
     IGNORE_PATTERNS,
+    LAST_RUN_FILE,
     MAIL_CONFIG,
     OUTPUT_DIR,
 )
 
 
 TARGET_TABLE_PATTERN = re.compile(r"([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)_etl\.sql$")
+
+ETL_DW_REPO = Path.home() / "code/etl-dw/"
 
 
 @dataclass
@@ -133,6 +137,41 @@ def send_failure_email(failed_files: list[tuple[str, str]]):
         server.send_message(msg)
 
 
+def get_git_changes(since: str) -> tuple[list[Path], list[Path]]:
+    """获取自指定时间以来的 ETL 文件变更列表。
+
+    Returns:
+        (changed_files, deleted_files) - 变更/新建文件列表, 删除文件列表
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", f"--since={since}", "--name-only", "--pretty=format:",
+             "--diff-filter=AD"],
+            cwd=str(ETL_DW_REPO),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        deleted_files: list[Path] = []
+        changed_files: list[Path] = []
+
+        for line in result.stdout.strip().splitlines():
+            if not line or line.startswith("ads-smartagent/expand") or line.startswith("ads_yummy/ads_yummy_sensors_data"):
+                continue
+            path = Path(line)
+            if line.endswith("_etl.sql"):
+                full_path = ETL_SQL_DIR / line
+                if path.exists():
+                    changed_files.append(full_path)
+                else:
+                    deleted_files.append(full_path)
+
+        return changed_files, deleted_files
+    except Exception as e:
+        print(f"Git 查询失败，回退到全量模式: {e}")
+        return [], []
+
+
 def run_all():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -186,19 +225,128 @@ def run_all():
 
     print(f"Success: {len(all_results)}, Failed: {len(failed_files)}")
 
+    update_last_run()
+
     if failed_files:
         send_failure_email(failed_files)
 
 
+def run_incremental():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not LAST_RUN_FILE.exists():
+        print("未找到上次运行记录，执行全量解析")
+        run_all()
+        return
+
+    with open(LAST_RUN_FILE, "r") as f:
+        last_run_data = json.load(f)
+        last_run_time = last_run_data["last_run"]
+
+    print(f"上次运行时间: {last_run_time}，查询变更文件...")
+
+    changed_files, deleted_files = get_git_changes(last_run_time)
+
+    if not changed_files and not deleted_files:
+        print("无变更文件，无需更新")
+        return
+
+    print(f"变更文件: {len(changed_files)} 个，删除文件: {len(deleted_files)} 个")
+
+    if not ETL_GRAPH_FILE.exists():
+        print("未找到血缘数据文件，执行全量解析")
+        run_all()
+        return
+
+    with open(ETL_GRAPH_FILE, "r") as f:
+        graph_data = json.load(f)
+    tables: dict[str, dict] = graph_data["tables"]
+
+    failed_files: list[tuple[str, str]] = []
+
+    if changed_files:
+        changed_files = [f for f in changed_files if should_parse(f)]
+        print(f"需要解析的文件: {len(changed_files)} 个")
+
+        for file_path in changed_files:
+            etl_path_str = str(file_path)
+            result = parse_etl_file(file_path)
+
+            if result:
+                target = result.target
+                if target not in tables:
+                    tables[target] = {"source_of_etl": [], "upstreams": [], "downstreams": []}
+
+                tables[target]["source_of_etl"] = [
+                    p for p in tables[target]["source_of_etl"]
+                    if not p.endswith(etl_path_str.split("/")[-1])
+                ]
+                tables[target]["source_of_etl"].append(etl_path_str)
+                tables[target]["upstreams"] = result.sources
+            else:
+                failed_files.append((etl_path_str, "sqllineage parse failed"))
+
+    for file_path in deleted_files:
+        etl_filename = file_path.name
+        for table_data in tables.values():
+            table_data["source_of_etl"] = [
+                p for p in table_data["source_of_etl"]
+                if not p.endswith(etl_filename)
+            ]
+
+    source_to_etls: dict[str, list[str]] = {}
+    for table, data in tables.items():
+        for etl_path in data["source_of_etl"]:
+            if etl_path not in source_to_etls:
+                source_to_etls[etl_path] = []
+            source_to_etls[etl_path].append(table)
+
+    for table, data in tables.items():
+        data["downstreams"] = source_to_etls.get(table, [])
+
+    for table_data in tables.values():
+        table_data["source_of_etl"] = list(set(table_data["source_of_etl"]))
+        table_data["downstreams"] = list(set(table_data["downstreams"]))
+
+    temp_file = ETL_GRAPH_FILE.with_suffix(".tmp")
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump({"tables": tables}, f, ensure_ascii=False, indent=2)
+    temp_file.rename(ETL_GRAPH_FILE)
+
+    generate_index(tables)
+
+    update_last_run()
+
+    print(f"增量更新完成。成功: {len(changed_files) - len(failed_files)}, 失败: {len(failed_files)}")
+
+    if failed_files:
+        send_failure_email(failed_files)
+
+
+def update_last_run():
+    """更新上次运行时间"""
+    last_run_data = {"last_run": datetime.now().isoformat()}
+    temp_file = LAST_RUN_FILE.with_suffix(".tmp")
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump(last_run_data, f)
+    temp_file.rename(LAST_RUN_FILE)
+
+
 def main():
     parser = argparse.ArgumentParser(description="ETL 表血缘分析工具")
-    parser.add_argument("--all", action="store_true", help="全量解析")
+    parser.add_argument("--all", action="store_true", help="强制全量解析")
+    parser.add_argument("--incremental", action="store_true", help="强制增量解析")
     args = parser.parse_args()
 
     if args.all:
         run_all()
+    elif args.incremental:
+        run_incremental()
     else:
-        parser.print_help()
+        if LAST_RUN_FILE.exists():
+            run_incremental()
+        else:
+            run_all()
 
 
 if __name__ == "__main__":
