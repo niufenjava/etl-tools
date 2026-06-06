@@ -25,3 +25,13 @@ python etl_tools.py trino-schema-sync --schema cdm_abite
 ```
 
 详细说明见 [trino-schema-sync/README.md](trino-schema-sync/README.md)
+
+### data-compare
+
+数据文件比较工具。比较两个文件的 ID 集合差异，输出只在其中一个文件存在的 ID。
+
+```bash
+python etl_tools.py data-compare file1.txt file2.txt
+```
+
+详细说明见 [data-compare/data_compare.py](data-compare/data_compare.py)

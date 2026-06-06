@@ -18,16 +18,18 @@ def main():
 可用工具:
   lineage           ETL 表血缘分析工具
   trino-schema-sync Trino 表结构同步工具
+  data-compare     数据文件比较工具
 
 示例:
   python etl_tools.py lineage --all
   python etl_tools.py trino-schema-sync --all
   python etl_tools.py trino-schema-sync --layer cdm
+  python etl_tools.py data-compare file1.txt file2.txt
 """,
     )
     parser.add_argument(
         "tool",
-        choices=["lineage", "trino-schema-sync"],
+        choices=["lineage", "trino-schema-sync", "data-compare"],
         help="工具名称",
     )
     parser.add_argument(
@@ -46,6 +48,10 @@ def main():
 
     elif tool == "trino-schema-sync":
         script = TOOLS_DIR / "trino-schema-sync" / "sync_trino_schema.py"
+        sys.exit(subprocess.call([sys.executable, str(script)] + tool_args))
+
+    elif tool == "data-compare":
+        script = TOOLS_DIR / "data-compare" / "data_compare.py"
         sys.exit(subprocess.call([sys.executable, str(script)] + tool_args))
 
 
