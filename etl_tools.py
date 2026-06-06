@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """etl-tools: 数仓开发工具集"""
 
 import argparse
